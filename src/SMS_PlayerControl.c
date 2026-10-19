@@ -42,7 +42,8 @@
 
 /* Immutable DMA lists: changing the stage never rewrites an in-flight packet. */
 static volatile unsigned int s_SeekStage;
-static uint64_t* s_SeekDiag[ 50 ];
+/* Keep this diagnostic table out of the already-full GP-relative small data. */
+static uint64_t* s_SeekDiag[ 50 ] __attribute__( ( section( ".bss" ) ) );
 
 void PlayerControl_SeekDiag ( unsigned int aStage ) {
  s_SeekStage = aStage < 50 ? aStage : 49;
