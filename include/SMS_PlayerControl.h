@@ -32,6 +32,9 @@ void                 PlayerControl_Destroy          ( void                      
 void                 PlayerControl_AdjustVolume     ( int                              );
 int                  PlayerControl_FastForward      ( void                             );
 int                  PlayerControl_Rewind           ( void                             );
+int                  PlayerControl_Resume           ( int64_t                          );
+void                 PlayerControl_SeekDiag         ( unsigned int                     );
+void                 PlayerControl_SeekDiagDraw     ( void                             );
 struct SMS_ListNode* PlayerControl_ChangeLang       ( void                             );
 struct SMS_ListNode* PlayerControl_GetLang          ( void                             );
 struct SMS_ListNode* PlayerControl_ChangeSubLang    ( void                             );

@@ -212,9 +212,11 @@ static void _terminate_threads ( int afDelete ) {
  ee_thread_status_t lThread;
 
  ChangeThreadPriority ( s_MainThreadID, SMS_THREAD_PRIORITY - 3 );
+ PlayerControl_SeekDiag ( 10 );
  s_Player.m_pIPUCtx -> StopSync ( 1 );
  s_Player.m_pIPUCtx -> Sync ();
  s_Player.m_pIPUCtx -> StopSync ( 0 );
+ PlayerControl_SeekDiag ( 11 );
  TerminateThread ( THREAD_ID_VR );
  TerminateThread ( THREAD_ID_VD );
  TerminateThread ( THREAD_ID_AD );
@@ -222,6 +224,7 @@ static void _terminate_threads ( int afDelete ) {
  ChangeThreadPriority ( s_MainThreadID, SMS_THREAD_PRIORITY );
 
  if ( lThread.status != 0x10 ) {
+  PlayerControl_SeekDiag ( 12 );
   s_Player.m_Flags |= SMS_FLAGS_STOP;
   if ( s_Player.m_Flags & SMS_FLAGS_PAUSE ) SignalSema ( s_SemaPauseAudio );
   SMS_RingBufferPost ( s_pAudioBuffer );
@@ -229,6 +232,7 @@ static void _terminate_threads ( int afDelete ) {
   s_Player.m_Flags &= ~SMS_FLAGS_STOP;
  }  /* end if */
 
+ PlayerControl_SeekDiag ( 13 );
  while (  SMS_RingBufferCount ( s_pVideoBuffer )  ) {
 
   SMS_FrameBuffer* lpFrame = ( SMS_FrameBuffer* )SMS_RingBufferWait ( s_pVideoBuffer );
@@ -325,6 +329,8 @@ static int _fill_packet_queues ( void ) {
 
  int          i, lStmIdx, lSize = 0, lLock = 0;
  SMS_Stream** lpStms = s_Player.m_pCont -> m_pStm;
+
+ PlayerControl_SeekDiag ( 32 );
 
  s_Player.m_pIPUCtx -> Suspend ();
  SMS_PgIndStart ();
@@ -519,6 +525,7 @@ static void _sms_video_renderer ( void* apParam ) {
     s_Player.m_pIPUCtx -> QueuePacket ( s_Player.m_OSDQWC[ 1 ], s_Player.m_OSDPackets[ 1 ] );
    }  /* end if */
 
+   PlayerControl_SeekDiagDraw ();
    s_Player.m_pIPUCtx -> Display ( lpFrame, s_Player.m_VideoTime = lpFrame -> m_StartPTS );
 
   } else {
@@ -848,7 +855,9 @@ static int _FFwd_AV ( void ) {
 
  _init_queues ( 0 );
  retVal = PlayerControl_FastForward ();
+ PlayerControl_SeekDiag ( 30 );
  if ( s_Player.m_AudioIdx >= 0 ) s_Player.m_pAudioCodec -> Init ( s_Player.m_pCont -> m_pStm[ s_Player.m_AudioIdx ] -> m_pCodec );
+ PlayerControl_SeekDiag ( 31 );
  _start_threads ();
 
  return retVal;
@@ -861,7 +870,9 @@ static int _Rew_AV ( void ) {
 
  _init_queues ( 0 );
  retVal = PlayerControl_Rewind ();
+ PlayerControl_SeekDiag ( 30 );
  if ( s_Player.m_AudioIdx >= 0 ) s_Player.m_pAudioCodec -> Init ( s_Player.m_pCont -> m_pStm[ s_Player.m_AudioIdx ] -> m_pCodec );
+ PlayerControl_SeekDiag ( 31 );
  _start_threads ();
 
  return retVal;
@@ -946,6 +957,7 @@ static int _sms_play ( void* apPlayer ) {
  uint64_t      lPOffTime  = g_Timer + g_Config.m_PowerOff;
  int           lfVolume   = !( s_Player.m_Flags & SMS_FLAGS_SPDIF );
  int           lfSeekable = s_Player.m_pCont -> m_Flags & SMS_CONT_FLAGS_SEEKABLE;
+ int64_t       lResumeTime = -1;
 
  lSemaParam.init_count = 0;
  lSema = CreateSema ( &lSemaParam );
@@ -1046,10 +1058,9 @@ static int _sms_play ( void* apPlayer ) {
 
     if (  GUI_Question ( ( char * )s_VideoBuffer )  ) {
 
-     SMS_Stream* lpStm = s_Player.m_pCont -> m_pStm[ s_Player.m_VideoIdx ];
-
-     lPTS = SMS_Rescale (  lPTS - s_Player.m_pCont -> m_StartTime, lpStm -> m_TimeBase.m_Den, SMS_TIME_BASE * ( int64_t )lpStm -> m_TimeBase.m_Num  );
-     s_Player.m_pCont -> Seek ( s_Player.m_pCont, s_Player.m_VideoIdx, -1, lPTS );
+     /* Defer until IPU and player control are ready; use the normal seek
+      * reset/preview/restart path rather than an unchecked startup seek. */
+     if ( lPTS >= 0 && lPTS < s_Player.m_pCont -> m_Duration ) lResumeTime = lPTS;
 
     }  /* end if */
 
@@ -1108,6 +1119,26 @@ repeat:
 
  while ( 1 ) {
 
+  /* AVI MPEG-4 can carry its VOL configuration only in the first packets.
+   * Decode from the beginning before seeking, just as a manual seek does.
+   * Positive video time means the renderer has received initial frames. */
+  if ( lResumeTime >= 0 && s_Player.m_VideoTime > 0 ) {
+   int lSeekOK;
+   _init_queues ( 0 );
+   lSeekOK = PlayerControl_Resume ( lResumeTime );
+   lResumeTime = -1;
+   if ( !lSeekOK ) {
+    s_Player.m_Flags |= SMS_FLAGS_EXIT | SMS_FLAGS_USER_STOP;
+    goto playback_done;
+   }
+   PlayerControl_SeekDiag ( 30 );
+   if ( s_Player.m_AudioIdx >= 0 ) s_Player.m_pAudioCodec -> Init ( s_Player.m_pCont -> m_pStm[ s_Player.m_AudioIdx ] -> m_pCodec );
+   PlayerControl_SeekDiag ( 31 );
+   _start_threads ();
+   lSize = _fill_packet_queues ();
+  }
+
+  PlayerControl_SeekDiag ( 0 );
   uint32_t lBtn = GUI_ReadButtons ();
 
   if ( lBtn ) {
@@ -1364,6 +1395,7 @@ skip:
 
   if ( lSize >= 0 ) {
 
+   PlayerControl_SeekDiag ( 40 );
    lSize = s_Player.m_pCont -> ReadPacket ( s_Player.m_pCont, &lPktIdx );
 
    if ( lSize <= 0 ) continue;
@@ -1394,6 +1426,7 @@ skip:
 
   }  /* end else */
 
+  PlayerControl_SeekDiag ( 41 );
   SMS_RingBufferPost ( lpStms[ lPktIdx ] -> m_pPktBuf );
 
  }  /* end while */
@@ -1434,6 +1467,7 @@ skip:
 
  }  /* end if */
 
+playback_done:
  DeleteSema ( lSema );
  _terminate_threads ( 1 );
  IPU_FRST ();

@@ -40,6 +40,19 @@
 
 #define OSD_Y_POS 32
 
+/* Immutable DMA lists: changing the stage never rewrites an in-flight packet. */
+static volatile unsigned int s_SeekStage;
+static uint64_t* s_SeekDiag[ 50 ];
+
+void PlayerControl_SeekDiag ( unsigned int aStage ) {
+ s_SeekStage = aStage < 50 ? aStage : 49;
+}
+
+void PlayerControl_SeekDiagDraw ( void ) {
+ uint64_t* lpPacket = s_SeekDiag[ s_SeekStage ];
+ if ( lpPacket ) s_Player.m_pIPUCtx -> QueuePacket ( GS_TXT_PACKET_SIZE( 3 ) + 1, lpPacket - 2 );
+}
+
 static char s_TimeFmt[] __attribute__(   (  section( ".data" ), aligned( 1 )  )   ) = "0:00:00";
 
 static int       s_VCDY;
@@ -302,6 +315,15 @@ void PlayerControl_Init ( void ) {
 /* Initialize display lists for OSD timer (status, current PTS, and total time) */
  g_GSCtx.m_TextColor = 0;
 
+ for ( lX = 0; lX < 50; ++lX ) {
+  char lCode[ 4 ];
+  sprintf ( lCode, "P%02d", lX );
+  s_SeekDiag[ lX ] = GSContext_NewList ( GS_TXT_PACKET_SIZE( 3 ) << 1 );
+  SyncDCache ( s_SeekDiag[ lX ] - 2, s_SeekDiag[ lX ] + ( GS_TXT_PACKET_SIZE( 3 ) << 1 ) );
+  GSFont_Render ( lCode, 3, 16, 64, _U( s_SeekDiag[ lX ] ) );
+ }
+ PlayerControl_SeekDiag ( 0 );
+
  lX     = GSFont_Width ( s_TimeFmt, 7 ) + 16;
  s_pPTS = GSContext_NewList (  GS_TXT_PACKET_SIZE( 7 ) << 1  );
  SyncDCache (   s_pPTS - 2, s_pPTS + (  GS_TXT_PACKET_SIZE( 7 ) << 1  )   );
@@ -454,6 +476,11 @@ void PlayerControl_Init ( void ) {
 void PlayerControl_Destroy ( void ) {
 
  int i;
+
+ for ( i = 0; i < 50; ++i ) {
+  if ( s_SeekDiag[ i ] ) GSContext_DeleteList ( s_SeekDiag[ i ] );
+  s_SeekDiag[ i ] = NULL;
+ }
 
  GSContext_DeleteList ( s_pPTS   );
  GSContext_DeleteList ( s_pAV    );
@@ -616,18 +643,25 @@ static void SeekCB ( SMS_RingBuffer* apRB ) {
 
 }  /* end SeekCB */
 
-static int PlayerControl_Scroll ( int aDir ) {
+static int _restart_after_preview ( SMS_Container* apCont, int aDir, int64_t aPos ) {
+ FileContext* lpFile = apCont -> m_pFileCtx;
+ lpFile -> Stream ( lpFile, lpFile -> m_CurPos, 0 );
+ if ( !apCont -> Seek ( apCont, s_Player.m_VideoIdx, aDir, aPos ) ) return 0;
+ return lpFile -> Stream ( lpFile, lpFile -> m_CurPos, lpFile -> m_StreamSize ) > 0;
+}
+
+static int PlayerControl_Scroll ( int aDir, int64_t aResumeTime ) {
 
  SMS_Container*    lpCont     = s_Player.m_pCont;
  SMS_Stream**      lpStms     = lpCont -> m_pStm;
  SMS_Stream*       lpStm      = lpStms[ s_Player.m_VideoIdx ];
  FileContext*      lpFileCtx  = lpCont -> m_pFileCtx;
  IPUContext*       lpIPUCtx   = s_Player.m_pIPUCtx;
- int64_t           lTime      = s_Player.m_VideoTime;
+ int64_t           lTime      = aResumeTime >= 0 ? aResumeTime : s_Player.m_VideoTime;
+ int64_t           lResumePos = 0;
  int               retVal     = 0;
  int64_t           lIncr      = 3000LL * aDir;
  uint64_t          lNextTime  = 0LL;
- uint32_t          lFilePos   = 0U;
  void*             lpHandler  = SMS_TimerReset ( 2, NULL );
  SMS_FrameBuffer*  lpFrame    = NULL;
  SMS_RingBuffer*   lpBuff     = lpStms[ s_Player.m_VideoIdx ] -> m_pPktBuf;
@@ -649,8 +683,10 @@ static int PlayerControl_Scroll ( int aDir ) {
       lpStm -> m_pCodec -> m_ID == SMS_CodecID_MPEG2
  ) lIncr <<= 3;
 
- lTime += lIncr;
+ if ( aResumeTime < 0 ) lTime += lIncr;
+ if ( lTime < 0 ) lTime = 0;
 
+ PlayerControl_SeekDiag ( 21 );
  lpFileCtx -> Stream ( lpFileCtx, lpFileCtx -> m_CurPos,  0 );
  lpFileCtx -> Stream ( lpFileCtx, lpFileCtx -> m_CurPos, 10 );
 
@@ -683,8 +719,9 @@ static int PlayerControl_Scroll ( int aDir ) {
 
   }  /* end if */
 
-  lFilePos = lpFileCtx -> m_CurPos;
+  lResumePos = lPos;
 
+  PlayerControl_SeekDiag ( 22 );
   if (  s_Player.m_pVideoCodec -> Decode (
          lpStm -> m_pCodec, lpDispBuff, lpBuff
         )
@@ -699,6 +736,11 @@ static int PlayerControl_Scroll ( int aDir ) {
 
    s_Player.m_VideoTime = lpFrame -> m_StartPTS;
    s_Player.m_AudioTime = lpFrame -> m_StartPTS;
+
+   if ( aResumeTime >= 0 ) {
+    retVal = 1;
+    goto end;
+   }
 
    do {
 
@@ -750,6 +792,7 @@ static int PlayerControl_Scroll ( int aDir ) {
 
       PlayerControl_DisplayTime ( 0, lpFrame -> m_StartPTS, 0 );
       lpIPUCtx -> Display ( lpFrame, -1 );
+      PlayerControl_SeekDiag ( 23 );
       lpIPUCtx -> Sync ();
 
       retVal = 1;
@@ -790,6 +833,7 @@ static int PlayerControl_Scroll ( int aDir ) {
 
  }  /* end while */
 end:
+ PlayerControl_SeekDiag ( 24 );
  SMS_Codec_MPEG12_Reset (
   SMS_MPEG12_RESET_QUEUE   |
   SMS_MPEG12_RESET_DECODER |
@@ -798,14 +842,18 @@ end:
  SMS_RingBufferReset ( lpBuff );
 
  lpBuff -> WaitCB = NULL;
+ lpBuff -> m_pWaitCBParam = NULL;
 
  s_Player.m_VideoTime = 0;
  s_Player.m_AudioTime = 0;
 
  if ( retVal ) {
 
-  lpFileCtx -> Stream ( lpFileCtx, lFilePos, 0                         );
-  lpFileCtx -> Stream ( lpFileCtx, lFilePos, lpFileCtx -> m_StreamSize );
+  /* Preview consumed packets and advanced the demuxer's stream counters.
+   * Rewinding just the file leaves those counters at the end of preview.
+   * Repeat the container seek to restore both the bytes and their timestamps. */
+  PlayerControl_SeekDiag ( 25 );
+  retVal = _restart_after_preview ( lpCont, aDir, lResumePos );
 
  }  /* end if */
 
@@ -823,15 +871,19 @@ end:
 
 int PlayerControl_FastForward ( void ) {
 
- return PlayerControl_Scroll ( 1 );
+ return PlayerControl_Scroll ( 1, -1 );
 
 }  /* end PlayerControl_FastForward */
 
 int PlayerControl_Rewind ( void ) {
 
- return PlayerControl_Scroll ( -1 );
+ return PlayerControl_Scroll ( -1, -1 );
 
 }  /* end PlayerControl_Rewind */
+
+int PlayerControl_Resume ( int64_t aTime ) {
+ return PlayerControl_Scroll ( -1, aTime );
+}
 
 static SMS_ListNode* _do_change_lang ( SMS_List* apList, SMS_ListNode* apListNode ) {
 
