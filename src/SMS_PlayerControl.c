@@ -50,7 +50,7 @@ void PlayerControl_SeekDiag ( unsigned int aStage ) {
 
 void PlayerControl_SeekDiagDraw ( void ) {
  uint64_t* lpPacket = s_SeekDiag[ s_SeekStage ];
- if ( lpPacket ) s_Player.m_pIPUCtx -> QueuePacket ( GS_TXT_PACKET_SIZE( 3 ) + 1, lpPacket - 2 );
+ if ( lpPacket ) g_IPUCtx.QueuePacket ( GS_TXT_PACKET_SIZE( 3 ) + 1, lpPacket - 2 );
 }
 
 static char s_TimeFmt[] __attribute__(   (  section( ".data" ), aligned( 1 )  )   ) = "0:00:00";
